@@ -28,6 +28,7 @@ enum kJobStatus {
     Done,
     Stopped
 };
+StrVec kStatusStr{"Running", "Done", "Stopped"};
 
 struct Job {
     pid_t pgid;
@@ -64,8 +65,22 @@ void trim(string &s) {
     s.erase(s.find_last_not_of(" \t") + 1);
 }
 
-void CheckBackground() {
-
+string VariableParse(string str) {
+    string val;
+    auto first_pos = str.find("${");
+    while (first_pos != string::npos) {
+        auto last_pos = str.find('}', first_pos);
+        if (last_pos == string::npos) {
+            break;
+        }
+        auto name = str.substr(first_pos + 2, last_pos - first_pos - 2);
+        cerr << name << endl;
+        if (getenv(name.data())) {
+            str.replace(first_pos, last_pos - first_pos + 1, getenv(name.data()));
+        }
+        first_pos = str.find("${", last_pos);
+    }
+    return str;
 }
 
 void ExecFront() {
@@ -82,7 +97,7 @@ void ExecFront() {
 
 void MyEcho(const StrVec &args, int input_fd, int output_fd, int err_fd) {
     fo(i, 1, args.size() - 1) {
-        STR_WRITE(output_fd, args[i]);
+        STR_WRITE(output_fd, VariableParse(args[i]));
         if (i < args.size() - 1)
             CHARS_WRITE(output_fd, " ");
     }
@@ -91,6 +106,10 @@ void MyEcho(const StrVec &args, int input_fd, int output_fd, int err_fd) {
 }
 
 void MyExit(const StrVec &args, int input_fd, int output_fd, int err_fd) {
+    if (args.size() > 2) {
+        CHARS_WRITE(err_fd, "Too many arguments for exit command.\n");
+        return;
+    }
     exit(0);
 }
 
@@ -227,11 +246,19 @@ void MyCd(const StrVec &args, int input_fd, int output_fd, int err_fd) {
 }
 
 void MyPwd(const StrVec &args, int input_fd, int output_fd, int err_fd) {
+    if (args.size() > 1) {
+        CHARS_WRITE(err_fd, "Too many arguments for pwd command.\n");
+        return;
+    }
     getcwd(buf, kBufferSize);
     CHARS_WRITE(output_fd, buf);
 }
 
 void MyTime(const StrVec &args, int input_fd, int output_fd, int err_fd) {
+    if (args.size() > 1) {
+        CHARS_WRITE(err_fd, "Too many arguments for time command.\n");
+        return;
+    }
     time_t raw_time;
     time(&raw_time);
     tm *tmp = localtime(&raw_time);
@@ -240,6 +267,10 @@ void MyTime(const StrVec &args, int input_fd, int output_fd, int err_fd) {
 }
 
 void MyClr(const StrVec &args, int input_fd, int output_fd, int err_fd) {
+    if (args.size() > 1) {
+        CHARS_WRITE(err_fd, "Too many arguments for clr command.\n");
+        return;
+    }
     if (output_fd == STDOUT_FILENO) {
         printf("\033c");
     }
@@ -273,7 +304,7 @@ void MyDir(const StrVec &args, int input_fd, int output_fd, int err_fd) {
 
 void MySet(const StrVec &args, int input_fd, int output_fd, int err_fd) {
     if (args.size() > 3) {
-        CHARS_WRITE(err_fd, "Too many argument of set command.\n");
+        CHARS_WRITE(err_fd, "Too many arguments for set command.\n");
         return;
     }
     if (args.size() == 1) {
@@ -296,7 +327,7 @@ void MySet(const StrVec &args, int input_fd, int output_fd, int err_fd) {
 
 void MyUmask(const StrVec &args, int input_fd, int output_fd, int err_fd) {
     if (args.size() > 2) {
-        CHARS_WRITE(err_fd, "Too many argument of umask command.\n");
+        CHARS_WRITE(err_fd, "Too many arguments for umask command.\n");
         return;
     }
     if (args.size() == 1) {
@@ -323,20 +354,54 @@ int ExecTest(const StrVec &args) {
         if (args[1] == "-d" || args[1] == "-f" || args[1] == "-r" || args[1] == "-s" || args[1] == "-w" || args[1] == "-x" || args[1] == "-b" || args[1] == "-c" || args[1] == "-e" ||
             args[1] == "-L") {
             struct stat file_status;
-            if (lstat(args[2].data(), &file_status) == -1) return 0;
+            auto file_path = VariableParse(args[2]);
+            if (lstat(file_path.data(), &file_status) == -1) return 0;
             if (args[1] == "-d") return S_ISDIR(file_status.st_mode);
-            else if (args[1] == "-r") return !access(args[2].data(), R_OK);
+            else if (args[1] == "-r") return !access(file_path.data(), R_OK);
             else if (args[1] == "-f") return S_ISREG(file_status.st_mode) && !S_ISDIR(file_status.st_mode);
-            else if (args[1] == "-s") return file_status.st_size > 0;
-            else if (args[1] == "-w") return !access(args[2].data(), W_OK);
-            else if (args[1] == "-x") return !access(args[2].data(), X_OK);
+            else if (args[1] == "-s") return !!file_status.st_size;
+            else if (args[1] == "-w") return !access(file_path.data(), W_OK);
+            else if (args[1] == "-x") return !access(file_path.data(), X_OK);
             else if (args[1] == "-b") return S_ISBLK(file_status.st_mode);
             else if (args[1] == "-c") return S_ISCHR(file_status.st_mode);
             else if (args[1] == "-e") return 1;
             else if (args[1] == "-L") return S_ISLNK(file_status.st_mode);
         }
-
+        if (args[1] == "-n" || args[1] == "-z") {
+            auto str = VariableParse(args[2]);
+            if (args[1] == "-n") return !str.empty();
+            if (args[1] == "-z") return str.empty();
+        }
     }
+    if (args.size() == 4) {
+        if (args[2] == "-eq" || args[2] == "-ne" || args[2] == "-gt" || args[2] == "-ge" || args[2] == "-lt" || args[2] == "-le") {
+            try {
+                auto int1 = stoi(VariableParse(args[1]));
+                auto int2 = stoi(VariableParse(args[3]));
+                if (args[2] == "-eq") return int1 == int2;
+                else if (args[2] == "-ne") return int1 != int2;
+                else if (args[2] == "-gt") return int1 > int2;
+                else if (args[2] == "-ge") return int1 >= int2;
+                else if (args[2] == "-lt") return int1 < int2;
+                else if (args[2] == "-le") return int1 <= int2;
+            }
+            catch (...) {
+                return -1;
+            }
+        }
+        if (args[2] == "==" || args[2] == "=" || args[2] == "!=" || args[2] == "<" || args[2] == "<=" || args[2] == ">" || args[2] == ">=") {
+            auto str1 = VariableParse(args[1]);
+            auto str2 = VariableParse(args[3]);
+            if (args[2] == "==") return str1 == str2;
+            if (args[2] == "=") return str1 == str2;
+            if (args[2] == "!=") return str1 != str2;
+            if (args[2] == "<") return str1 < str2;
+            if (args[2] == "<=") return str1 <= str2;
+            if (args[2] == ">") return str1 > str2;
+            if (args[2] == ">=") return str1 >= str2;
+        }
+    }
+    return -1;
 }
 
 void Mytest(const StrVec &args, int input_fd, int output_fd, int err_fd) {
@@ -345,7 +410,23 @@ void Mytest(const StrVec &args, int input_fd, int output_fd, int err_fd) {
         return;
     }
     int res = ExecTest(args);
+    if (~res) {
+        CHARS_WRITE(output_fd, res ? "true" : "false");
+    } else {
+        CHARS_WRITE(err_fd, "Invalid argument of test command.\n");
+    }
+}
 
+void MyJobs(const StrVec &args, int input_fd, int output_fd, int err_fd) {
+    if (args.size() > 1) {
+        CHARS_WRITE(err_fd, "Too many arguments for jobs command.\n");
+        return;
+    }
+    fo(i, jobs_front, jobs_back - 1)if (jobs[i].status != Done) {
+            auto msg = (string) "[" + to_string(i) + "]\t" + kStatusStr[jobs[i].status] + "\t\"" + jobs[i].command + "\"\t" + to_string(jobs[i].pgid) +
+                       "\n";
+            STR_WRITE(STDOUT_FILENO, msg);
+        }
 }
 
 void ExecSingleCmd(const StrVec &args, int input_fd, int output_fd, int err_fd) {
@@ -366,9 +447,15 @@ void ExecSingleCmd(const StrVec &args, int input_fd, int output_fd, int err_fd) 
     } else if (args[0] == "fg") {
         MyFg(args, input_fd, output_fd, err_fd);
     } else if (args[0] == "jobs") {
-//        MyJobs(args, input_fd, output_fd, err_fd);
+        MyJobs(args, input_fd, output_fd, err_fd);
     } else if (args[0] == "exit") {
         MyExit(args, input_fd, output_fd, err_fd);
+    } else if (args[0] == "echo") {
+        MyEcho(args, input_fd, output_fd, err_fd);
+    } else if (args[0] == "umask") {
+        MyUmask(args, input_fd, output_fd, err_fd);
+    } else if (args[0] == "test") {
+        Mytest(args, input_fd, output_fd, err_fd);
     } else {
         MyCall(args, input_fd, output_fd, err_fd);
     }
@@ -475,8 +562,7 @@ int ExecCmdPipe(const string &cmd_str, int input_fd = STDIN_FILENO, int output_f
 }
 
 void CheckJobs() {
-    fo(i, jobs_front, jobs_back - 1)
-        if (jobs[i].status == Running) {
+    fo(i, jobs_front, jobs_back - 1)if (jobs[i].status == Running) {
             pid_t pid;
             while ((pid = waitpid(-jobs[i].pgid, nullptr, WNOHANG)) > 0);
             if (pid == -1 && errno == ECHILD) {
@@ -542,8 +628,7 @@ InputAndExec(int cmd_input_fd, int input_fd = STDIN_FILENO, int output_fd = STDO
         ShowPrompt();
     }
     while ((cmd_len = read(cmd_input_fd, cmd_buf, kBufferSize)) > 0) {
-        fo(i, 0, cmd_len - 1)
-            if (cmd_buf[i] == '\n') {
+        fo(i, 0, cmd_len - 1)if (cmd_buf[i] == '\n') {
                 CheckJobs();
                 if (!cmd_str.empty()) ExecCmdBackground(cmd_str);
 //                int val;
@@ -576,7 +661,7 @@ void SignalHandler(int signal) {
     if (signal == SIGINT) {
         CHARS_WRITE(STDOUT_FILENO, "\n");
         if (front_job == -1) return;
-        assert(front_job > 0);
+//        jobs[front_job].status = Done;
         kill(-jobs[front_job].pgid, SIGINT);
 //        ShowPrompt();
     } else if (signal == SIGCHLD) {
